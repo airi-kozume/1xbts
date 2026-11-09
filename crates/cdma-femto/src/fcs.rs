@@ -8,17 +8,7 @@ use cdma_ios::{
     AddsDeliverAckMessage, AddsDeliverMessage, AddsPageAckMessage, AddsPageMessage,
     AddsTransferAckMessage, AddsTransferMessage, AssignmentRequestMessage, CellId,
     CompleteLayer3InformationMessage, EncodedA1Message, Layer3Information,
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-    LocationUpdatingAcceptMessage, Message, MessageType, PagingRequestMessage, Tag,
-=======
-    LocationUpdatingAcceptMessage, LocationUpdatingRejectMessage, Message, MessageType,
-    PagingRequestMessage,
->>>>>>> Stashed changes
-=======
-    LocationUpdatingAcceptMessage, LocationUpdatingRejectMessage, Message, MessageType,
-    PagingRequestMessage,
->>>>>>> Stashed changes
+    LocationUpdatingAcceptMessage, Message, MessageType, PagingRequestMessage, LocationUpdatingRejectMessage, Tag
 };
 use tokio::sync::mpsc;
 
