@@ -55,7 +55,11 @@
       "tag_p_rev": 1
     },
     "home_network": {
+<<<<<<< Updated upstream
       "sid": 56,
+=======
+      "sid": 4168,
+>>>>>>> Stashed changes
       "nid": 65535
     },
     "nam_defaults": {
