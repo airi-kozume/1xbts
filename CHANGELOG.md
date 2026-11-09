@@ -1,4 +1,5 @@
 # HEAD
+<<<<<<< Updated upstream
 - Airave 2.5 (5.x firmware) femtocells now receive a changed `term_auth_psk` on the next sync (EV-DO terminal authentication failed after the secret was regenerated).
 - A1 now runs as A1p (BSAP over SUA over SCTP 14001).
 - Abis traffic, A2p, A8/A10, A9, A11 and A21 now use their standard formats and ports, so third-party PCFs and PDSNs interoperate. `docs/PORTS.md` lists the ports.
@@ -13,6 +14,38 @@
 - Improve traffic channel FER (RC1/RC2/RC3).
 - Web UI UX updates.
 - Fix issue with USB threads not getting real-time scheduling on macOS.
+=======
+
+- Reduce navigation clutter in simplified article pages.
+
+- Add legacy-browser search and simplified page reading to the carrier portal.
+
+- Add mounted HTTP host/path rewrite rules for legacy messenger revivals.
+- Add mounted carrier-browser profiles for configuration-only proxy onboarding.
+- Serve a compact Kozume Wireless start portal to retired USCC mobile browsers.
+- Resolve retired USCC carrier-browser proxy hostnames to the packet gateway.
+- Add staged systemd units for headless Kozume Wireless startup.
+- Enforce subscriber-only CDMA registration when the MSC is restarted.
+- Disable EV-DO on the Kozume Wireless femtocell profile.
+- Forward MSC registration refusals to Fx2 handsets as Location Updating Reject messages.
+
+- Add an opt-in transparent HTTP-to-HTTPS compatibility gateway for legacy browsers.
+- Add an opt-in packet-network-wide HTTPS refusal mode for legacy handsets.
+- Pace femtocell EV-DO forward RLP packets to prevent downlink burst drains.
+- Recover uniquely validated one-byte IPv4/TCP bearer corruptions after a PPP
+  FCS failure.
+- Add an opt-in PDSN packet-capture startup path and capture runbook for
+  correlating RLP, PPP, and gateway traces.
+
+- Align local OTASP home provisioning with Sprint SID 4168.
+
+- Ignore inactive call identities when correlating femtocell OTASP replies.
+- Document Linux PRL generation and staged Kozume network-identity migration.
+- Document LG Vortex 1x/EV-DO provisioning and cellular IPv4/DNS verification.
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
 - Fix issue with femtocell configuration drift.
 - Added closed access mode (defaults to open) to allow system access for subscribers only (1x and EVDO).
 - Fix issue on Femtocells where DST not applied properly. Add optional per-site `timezone` override in `config/femto.json`.

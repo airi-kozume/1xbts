@@ -7032,9 +7032,11 @@ dependencies = [
  "gw-transcode",
  "http",
  "roxmltree",
+ "scraper",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

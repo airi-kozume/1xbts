@@ -8,7 +8,17 @@ use cdma_ios::{
     AddsDeliverAckMessage, AddsDeliverMessage, AddsPageAckMessage, AddsPageMessage,
     AddsTransferAckMessage, AddsTransferMessage, AssignmentRequestMessage, CellId,
     CompleteLayer3InformationMessage, EncodedA1Message, Layer3Information,
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
     LocationUpdatingAcceptMessage, Message, MessageType, PagingRequestMessage, Tag,
+=======
+    LocationUpdatingAcceptMessage, LocationUpdatingRejectMessage, Message, MessageType,
+    PagingRequestMessage,
+>>>>>>> Stashed changes
+=======
+    LocationUpdatingAcceptMessage, LocationUpdatingRejectMessage, Message, MessageType,
+    PagingRequestMessage,
+>>>>>>> Stashed changes
 };
 use tokio::sync::mpsc;
 
@@ -324,6 +334,10 @@ impl FemtoConvergenceServer {
             MessageType::LocationUpdatingAccept => {
                 let accept = LocationUpdatingAcceptMessage::decode(&message.payload)?;
                 Ok(FemtoInterfaceMsg::from_location_updating_accept(&accept)?)
+            }
+            MessageType::LocationUpdatingReject => {
+                let reject = LocationUpdatingRejectMessage::decode(&message.payload)?;
+                Ok(FemtoInterfaceMsg::from_location_updating_reject(&reject)?)
             }
             MessageType::AssignmentRequest => {
                 let assignment = AssignmentRequestMessage::decode(&message.payload)?;
@@ -831,6 +845,38 @@ mod tests {
 
         assert_eq!(femto.message_type, 0x02);
         assert_eq!(femto.discriminator, Some(Discriminator::Dtap));
+    }
+
+    #[test]
+    fn maps_location_updating_reject_to_standard_fx2_message() {
+        let reject = LocationUpdatingRejectMessage {
+            reject_cause: cdma_ios::RejectCause(cdma_ios::REJECT_CAUSE_ILLEGAL_MS),
+        };
+        let message = Message::new(
+            MessageType::LocationUpdatingReject,
+            reject.encode().expect("Location Updating Reject"),
+        );
+        let encoded = EncodedA1Message::from_message(&message);
+
+        let femto = FemtoConvergenceServer::new()
+            .from_msc_a1(&encoded)
+            .expect("Fx2 message");
+
+        assert_eq!(
+            femto.message_type,
+            cdma_ios::femto_interface_msg::MSG_TYPE_LOCATION_UPDATING_REJECT
+        );
+        assert_eq!(femto.discriminator, Some(Discriminator::Dtap));
+        assert_eq!(
+            femto
+                .first_ie(cdma_ios::femto_interface_msg::IE_CAUSE)
+                .unwrap()
+                .content,
+            vec![
+                cdma_ios::femto_interface_msg::IE_CAUSE,
+                cdma_ios::REJECT_CAUSE_ILLEGAL_MS
+            ]
+        );
     }
 
     #[test]

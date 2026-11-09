@@ -29,7 +29,11 @@ const HRPD_DATA_READY_RETRY_INTERVAL: Duration = Duration::from_millis(1200);
 const HRPD_A8_FALLBACK_FORWARD_DRC_INDEX: u8 = 0x2;
 const HRPD_A8_DOWNLINK_STATS_INTERVAL: Duration = Duration::from_secs(1);
 const HRPD_A8_PARTIAL_PACKET_COALESCE_DELAY: Duration = Duration::from_millis(12);
-const HRPD_A8_FORWARD_MAX_PACKETS_PER_FLUSH: usize = 16;
+// The FAP transport is an unbounded queue, not a physical-layer scheduler.
+// Pace each completed forward RLP packet here so an A10 burst cannot turn into
+// an immediate burst of RF packets at the handset.
+const HRPD_A8_FORWARD_PACKET_INTERVAL: Duration = Duration::from_millis(20);
+const HRPD_A8_FORWARD_MAX_PACKETS_PER_FLUSH: usize = 1;
 const HRPD_A8_RLP_RETRANSMIT_MATERIALIZE_BUDGET: usize = HRPD_A8_FORWARD_MAX_PACKETS_PER_FLUSH;
 const HRPD_A8_RLP_HISTORY_MAX_OCTETS: usize = 1 << 20;
 const HRPD_DISABLE_HRPD_A8_OPEN_CONNECTION_PAGE: bool = false;
@@ -436,6 +440,7 @@ struct HrpdAnA8Session {
     data_ready_acknowledged: bool,
     last_drc_index: Option<u8>,
     last_drc_at: Option<Instant>,
+    next_forward_packet_at: Option<Instant>,
     pending_downlink_partial_hold_at: Option<Instant>,
     pending_downlink: VecDeque<Vec<u8>>,
     rlp_history: VecDeque<HrpdRlpHistoryOctet>,
@@ -476,6 +481,7 @@ impl HrpdAnA8Session {
             data_ready_acknowledged: false,
             last_drc_index: None,
             last_drc_at: None,
+            next_forward_packet_at: None,
             pending_downlink_partial_hold_at: None,
             pending_downlink: VecDeque::new(),
             rlp_history: VecDeque::new(),
@@ -1347,6 +1353,12 @@ fn flush_hrpd_a8_downlink(
     if !session.default_packet_flow_open {
         return send_hrpd_a8_data_ready(uati, session, forward_signaling_tx, forward_traffic_tx);
     }
+    if session
+        .next_forward_packet_at
+        .is_some_and(|next| next > Instant::now())
+    {
+        return true;
+    }
     let mut sent_packets = 0usize;
     while (!session.pending_retransmit.is_empty()
         || !session.pending_retransmit_requests.is_empty()
@@ -1428,6 +1440,8 @@ fn flush_hrpd_a8_downlink(
                     .sum::<u32>();
                 session.rlp_seq =
                     session.rlp_seq.wrapping_add(sent_new_octets) & rlp::SEQUENCE_MASK;
+                session.next_forward_packet_at =
+                    Some(Instant::now() + HRPD_A8_FORWARD_PACKET_INTERVAL);
                 sent_packets += 1;
             }
             HrpdA8RlpQueueStatus::Skipped => {
@@ -1661,9 +1675,17 @@ fn hrpd_a8_next_flush_delay(session: &HrpdAnA8Session) -> Option<Duration> {
 
     Some(
         session
-            .pending_downlink_partial_hold_at
-            .map(|held_at| HRPD_A8_PARTIAL_PACKET_COALESCE_DELAY.saturating_sub(held_at.elapsed()))
-            .unwrap_or(Duration::ZERO),
+            .next_forward_packet_at
+            .map(|next| next.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::ZERO)
+            .max(
+                session
+                    .pending_downlink_partial_hold_at
+                    .map(|held_at| {
+                        HRPD_A8_PARTIAL_PACKET_COALESCE_DELAY.saturating_sub(held_at.elapsed())
+                    })
+                    .unwrap_or(Duration::ZERO),
+            ),
     )
 }
 
@@ -3674,6 +3696,25 @@ mod tests {
         assert_eq!(session.traffic_window_stats.forward_packets, 1);
         assert_eq!(session.traffic_window_stats.rlp_full_packets, 1);
         assert_eq!(session.traffic_window_stats.rlp_partial_packets, 0);
+        assert_eq!(session.traffic_window_stats.rlp_partial_deferred, 0);
+        assert!(session.pending_downlink_partial_hold_at.is_none());
+
+        assert!(flush_hrpd_a8_downlink(
+            0x1a05_8001,
+            &mut session,
+            &signaling_tx,
+            &traffic_tx
+        ));
+        assert!(traffic_rx.try_recv().is_err(), "forward packet is paced");
+
+        session.next_forward_packet_at = None;
+        assert!(flush_hrpd_a8_downlink(
+            0x1a05_8001,
+            &mut session,
+            &signaling_tx,
+            &traffic_tx
+        ));
+        assert!(traffic_rx.try_recv().is_err());
         assert_eq!(session.traffic_window_stats.rlp_partial_deferred, 1);
         assert!(session.pending_downlink_partial_hold_at.is_some());
 
@@ -3809,6 +3850,13 @@ mod tests {
             repair.payload, expected_repair,
             "priority repair must contain no new bytes"
         );
+        session.next_forward_packet_at = None;
+        assert!(flush_hrpd_a8_downlink(
+            UATI,
+            &mut session,
+            &signaling_tx,
+            &traffic_tx
+        ));
         let new_data = traffic_rx
             .try_recv()
             .expect("new data remains normal priority");
@@ -3861,6 +3909,7 @@ mod tests {
         assert_eq!(session.pending_retransmit[0].sequence, 1);
         assert_eq!(session.pending_retransmit[0].octets, vec![0x11, 0x12]);
 
+        session.next_forward_packet_at = None;
         assert!(flush_hrpd_a8_downlink(
             0x1a05_8001,
             &mut session,

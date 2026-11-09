@@ -19,6 +19,10 @@ const RLP_RECORD_VERSION: u8 = 1;
 
 const DEFAULT_PPP_PCAP_PATH: &str = "/tmp/cdma-packet-ppp.pcap";
 const DEFAULT_RLP_PCAP_PATH: &str = "/tmp/cdma-packet-rlp.pcap";
+const DEFAULT_A10_PCAP_PATH: &str = "/tmp/cdma-packet-a10.pcap";
+
+const A10_RECORD_MAGIC: &[u8; 4] = b"CA10";
+const A10_RECORD_VERSION: u8 = 1;
 
 #[derive(Clone, Copy)]
 pub enum Direction {
@@ -93,6 +97,7 @@ impl PcapWriter {
 
 static PPP_WRITER: OnceLock<Option<Mutex<PcapWriter>>> = OnceLock::new();
 static RLP_WRITER: OnceLock<Option<Mutex<PcapWriter>>> = OnceLock::new();
+static A10_WRITER: OnceLock<Option<Mutex<PcapWriter>>> = OnceLock::new();
 static CAPTURE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn capture_enabled() -> bool {
@@ -114,7 +119,14 @@ fn ppp_writer() -> Option<&'static Mutex<PcapWriter>> {
         return None;
     }
     PPP_WRITER
-        .get_or_init(|| open_writer("PPP PCAP", DEFAULT_PPP_PCAP_PATH, LINKTYPE_PPP_WITH_DIR))
+        .get_or_init(|| {
+            open_writer(
+                "PPP PCAP",
+                DEFAULT_PPP_PCAP_PATH,
+                "cdma-packet-ppp.pcap",
+                LINKTYPE_PPP_WITH_DIR,
+            )
+        })
         .as_ref()
 }
 
@@ -123,21 +135,44 @@ fn rlp_writer() -> Option<&'static Mutex<PcapWriter>> {
         return None;
     }
     RLP_WRITER
-        .get_or_init(|| open_writer("RLP PCAP", DEFAULT_RLP_PCAP_PATH, LINKTYPE_USER0))
+        .get_or_init(|| {
+            open_writer(
+                "RLP PCAP",
+                DEFAULT_RLP_PCAP_PATH,
+                "cdma-packet-rlp.pcap",
+                LINKTYPE_USER0,
+            )
+        })
         .as_ref()
 }
 
-fn open_writer(label: &str, default_path: &str, linktype: u32) -> Option<Mutex<PcapWriter>> {
+fn a10_writer() -> Option<&'static Mutex<PcapWriter>> {
+    if !capture_enabled() {
+        return None;
+    }
+    A10_WRITER
+        .get_or_init(|| {
+            open_writer(
+                "A10 PCAP",
+                DEFAULT_A10_PCAP_PATH,
+                "cdma-packet-a10.pcap",
+                LINKTYPE_USER0,
+            )
+        })
+        .as_ref()
+}
+
+fn open_writer(
+    label: &str,
+    default_path: &str,
+    capture_filename: &str,
+    linktype: u32,
+) -> Option<Mutex<PcapWriter>> {
     let path = PathBuf::from(std::env::var("CDMA_PACKET_CAPTURE_DIR").ok().map_or_else(
         || default_path.to_string(),
         |dir| {
-            let filename = if linktype == LINKTYPE_PPP_WITH_DIR {
-                "cdma-packet-ppp.pcap"
-            } else {
-                "cdma-packet-rlp.pcap"
-            };
             Path::new(&dir)
-                .join(filename)
+                .join(capture_filename)
                 .to_string_lossy()
                 .into_owned()
         },
@@ -180,6 +215,36 @@ pub fn write_rlp_frame(direction: Direction, rate_bps: u32, bits: &[u8]) {
         record.extend_from_slice(&(bits.len() as u16).to_le_bytes());
         record.extend_from_slice(&0u16.to_le_bytes());
         record.extend_from_slice(bits);
+        writer.write_packet(&record);
+    }
+}
+
+/// Record a raw A10 Unstructured Byte Stream chunk before PPP deframing.
+///
+/// The USER0 payload is `CA10`, version, direction, reserved u16, payload
+/// length u16, reserved u16, followed by the A10 payload octets.
+pub fn write_a10_chunk(direction: Direction, octets: &[u8]) {
+    if let Some(writer) = a10_writer()
+        && let Ok(mut writer) = writer.lock()
+    {
+        let len = match u16::try_from(octets.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                log::warn!(
+                    "capture: A10 chunk too large to record: {} bytes",
+                    octets.len()
+                );
+                return;
+            }
+        };
+        let mut record = Vec::with_capacity(12 + octets.len());
+        record.extend_from_slice(A10_RECORD_MAGIC);
+        record.push(A10_RECORD_VERSION);
+        record.push(direction.as_u8());
+        record.extend_from_slice(&0u16.to_le_bytes());
+        record.extend_from_slice(&len.to_le_bytes());
+        record.extend_from_slice(&0u16.to_le_bytes());
+        record.extend_from_slice(octets);
         writer.write_packet(&record);
     }
 }

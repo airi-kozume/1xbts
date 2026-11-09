@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 
-use scraper::Html;
 use scraper::node::Node;
+use scraper::{Html, Selector};
 use url::Url;
 
 use crate::doc::{Block, Deck, Field, Form, FormMethod, Inline, is_renderable, sanitize};
@@ -47,10 +47,44 @@ pub fn html_to_deck(html: &str, base_url: &str, limits: &Limits) -> Deck {
         deck: Deck::new(),
         line: Vec::new(),
         limits: *limits,
+        reader: false,
     };
     walk(doc.tree.root(), &mut ctx);
     ctx.flush_line();
     if ctx.deck.title.is_none() {
+        ctx.deck.title = Some("Page".to_string());
+    }
+    ctx.deck
+}
+
+/// Reduce an article to its main content for a reader-oriented browser.
+/// Fall back to the full document when a site does not identify its content.
+pub fn html_to_reader_deck(html: &str, base_url: &str, limits: &Limits) -> Deck {
+    let doc = Html::parse_document(html);
+    let mut ctx = Walker {
+        base: Url::parse(base_url).ok(),
+        deck: Deck::new(),
+        line: Vec::new(),
+        limits: *limits,
+        reader: true,
+    };
+    let title = Selector::parse("title").expect("valid selector");
+    ctx.deck.title = doc
+        .select(&title)
+        .next()
+        .map(|e| collapse_ws(&e.text().collect::<String>()));
+    let content = ["#mw-content-text", "main", "article", "[role=main]"]
+        .iter()
+        .find_map(|s| {
+            doc.select(&Selector::parse(s).expect("valid selector"))
+                .next()
+        });
+    match content {
+        Some(element) => walk(doc.tree.get(element.id()).expect("selected node"), &mut ctx),
+        None => walk(doc.tree.root(), &mut ctx),
+    }
+    ctx.flush_line();
+    if ctx.deck.title.as_deref().is_none_or(str::is_empty) {
         ctx.deck.title = Some("Page".to_string());
     }
     ctx.deck
@@ -77,6 +111,7 @@ struct Walker {
     deck: Deck,
     line: Vec<Inline>,
     limits: Limits,
+    reader: bool,
 }
 
 impl Walker {
@@ -171,6 +206,27 @@ fn walk(node: ego_tree::NodeRef<'_, Node>, ctx: &mut Walker) {
             Node::Text(t) => ctx.push_text(t),
             Node::Element(el) => {
                 let name = el.name();
+                if ctx.reader
+                    && (matches!(name, "nav" | "header" | "footer" | "aside")
+                        || el.attr("role").is_some_and(|role| {
+                            matches!(role, "navigation" | "banner" | "contentinfo")
+                        })
+                        || el.attr("class").is_some_and(|classes| {
+                            classes.split_whitespace().any(|class| {
+                                matches!(
+                                    class,
+                                    "mw-editsection"
+                                        | "reference"
+                                        | "navbox"
+                                        | "reflist"
+                                        | "toc"
+                                        | "metadata"
+                                )
+                            })
+                        }))
+                {
+                    continue;
+                }
                 match name {
                     "script" | "style" | "noscript" | "svg" | "template" => {}
                     // Control and label text belongs to the form block, not
@@ -467,6 +523,21 @@ mod tests {
 
     fn deck_of(html: &str, base: &str) -> Deck {
         html_to_deck(html, base, &Limits::default())
+    }
+
+    #[test]
+    fn reader_prioritizes_article_and_omits_navigation() {
+        let html = r#"<title>Example</title><nav><a href="/menu">Menu</a></nav>
+            <main><div id="mw-content-text"><p>Article <a href="/topic">topic</a></p>
+            <span class="mw-editsection"><a href="/edit">Edit</a></span>
+            <sup class="reference"><a href="/citation">1</a></sup></div></main>"#;
+        let deck = html_to_reader_deck(html, "https://example.org/", &Limits::default());
+        let output = format!("{deck:?}");
+        assert!(output.contains("Article"));
+        assert!(output.contains("https://example.org/topic"));
+        assert!(!output.contains("Menu"));
+        assert!(!output.contains("Edit"));
+        assert!(!output.contains("citation"));
     }
 
     #[test]

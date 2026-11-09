@@ -11,10 +11,22 @@ SPEEDTEST_UPSTREAM="${SPEEDTEST_UPSTREAM:-http://speedtest:5656}"
 LOCAL_DNS_ZONE="${LOCAL_DNS_ZONE:-local.1xbts.org}"
 UNBOUND_FORWARD_ADDRS="${UNBOUND_FORWARD_ADDRS:-${DNS_UPSTREAMS:-8.8.8.8}}"
 GATEWAY_IP="${TUNNEL_ADDR%%/*}"
+# Compatibility mode for legacy handsets: refuse HTTPS before a handset can
+# enter a TLS exchange. Plain HTTP can still be handled by the local gateways.
+BLOCK_MOBILE_HTTPS="${BLOCK_MOBILE_HTTPS:-0}"
+HTTP_COMPAT_GW_ENABLE="${HTTP_COMPAT_GW_ENABLE:-0}"
+# REDIRECT delivers traffic to the inbound interface address, not loopback.
+# Bind only the handset-facing tunnel address so the relay is not reachable
+# through the container's compose-network interface.
+HTTP_COMPAT_GW_BIND="${HTTP_COMPAT_GW_BIND:-${GATEWAY_IP}:8081}"
+LEGACY_BROWSER_PROFILES_FILE="${LEGACY_BROWSER_PROFILES_FILE:-/etc/legacy-browser-profiles.conf}"
+HTTP_COMPAT_GW_REWRITES="${HTTP_COMPAT_GW_REWRITES:-}"
 
 # Carrier MMSC hostnames redirected to our local Mbuni MMSC.
 # Architecture: https://1xbts.org/docs/guides/mms
 MMSC_HIJACK_HOSTS="${MMSC_HIJACK_HOSTS:-mms.vtext.com,mmsc.vtext.com,mms.myvzw.com,mmsc.sprintpcs.com,mms.sprintpcs.com,mmsc.mobile.att.net,mmsc.cingular.com,mms.msg.eng.t-mobile.com,mms.t-mobile.com,mmsc.uscc.net,mmsc.aiowireless.net}"
+# Legacy carrier browsers can resolve a fixed WAP proxy before attempting a
+# destination hostname. Answer those retired USCC names locally first.
 
 EDGE_RESOLVER_BIND="${EDGE_RESOLVER_BIND:-127.0.0.1:8088}"
 MGMT_GRPC_ADDR="${MGMT_GRPC_ADDR:-host.docker.internal:17016}"
@@ -74,6 +86,39 @@ ip link set fou0 up
 
 iptables -t nat -C POSTROUTING -s "$MOBILE_CIDR" -o eth0 -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -s "$MOBILE_CIDR" -o eth0 -j MASQUERADE
+if [ "$BLOCK_MOBILE_HTTPS" = "1" ]; then
+    # Insert before the broad mobile-subnet FORWARD accepts below. A TCP reset
+    # fails immediately; the ICMP rejection covers HTTP/3-capable clients.
+    iptables -C FORWARD -i fou0 -s "$MOBILE_CIDR" -p tcp --dport 443 \
+        -j REJECT --reject-with tcp-reset 2>/dev/null \
+      || iptables -I FORWARD 1 -i fou0 -s "$MOBILE_CIDR" -p tcp --dport 443 \
+        -j REJECT --reject-with tcp-reset
+    iptables -C FORWARD -i fou0 -s "$MOBILE_CIDR" -p udp --dport 443 \
+        -j REJECT --reject-with icmp-port-unreachable 2>/dev/null \
+      || iptables -I FORWARD 1 -i fou0 -s "$MOBILE_CIDR" -p udp --dport 443 \
+        -j REJECT --reject-with icmp-port-unreachable
+fi
+# Intercept normal handset HTTP without requiring a handset proxy setting.
+# Services deliberately hosted on the packet gateway (MMSC and speedtest) stay
+# on nginx, where their existing host-specific configuration applies.
+if [ "$HTTP_COMPAT_GW_ENABLE" = "1" ]; then
+    if [ -r "$LEGACY_BROWSER_PROFILES_FILE" ]; then
+      while IFS='|' read -r profile _hosts ports _portals; do
+        case "$profile" in ''|'#'*) continue ;; esac
+        for port in $(printf '%s\n' "$ports" | tr ',' ' '); do
+          case "$port" in ''|*[!0-9]*) continue ;; esac
+          iptables -t nat -C PREROUTING -i fou0 -s "$MOBILE_CIDR" -d "$GATEWAY_IP" \
+              -p tcp --dport "$port" -j REDIRECT --to-ports 8081 2>/dev/null \
+            || iptables -t nat -I PREROUTING 1 -i fou0 -s "$MOBILE_CIDR" -d "$GATEWAY_IP" \
+              -p tcp --dport "$port" -j REDIRECT --to-ports 8081
+        done
+      done <"$LEGACY_BROWSER_PROFILES_FILE"
+    fi
+    iptables -t nat -C PREROUTING -i fou0 -s "$MOBILE_CIDR" ! -d "$GATEWAY_IP" \
+        -p tcp --dport 80 -j REDIRECT --to-ports 8081 2>/dev/null \
+      || iptables -t nat -A PREROUTING -i fou0 -s "$MOBILE_CIDR" ! -d "$GATEWAY_IP" \
+        -p tcp --dport 80 -j REDIRECT --to-ports 8081
+fi
 iptables -C FORWARD -i fou0 -o eth0 -s "$MOBILE_CIDR" -j ACCEPT 2>/dev/null \
   || iptables -A FORWARD -i fou0 -o eth0 -s "$MOBILE_CIDR" -j ACCEPT
 iptables -C FORWARD -i eth0 -o fou0 -d "$MOBILE_CIDR" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
@@ -262,6 +307,24 @@ if [ -n "$MMSC_HIJACK_HOSTS" ]; then
   done
 fi
 
+# Point provisioned carrier-browser proxy names at the packet gateway. The
+# handset keeps its assigned port, allowing the appropriate WAP transport to
+# handle its request without a handset configuration change.
+PORTAL_HOSTS=""
+if [ -r "$LEGACY_BROWSER_PROFILES_FILE" ]; then
+  echo "Legacy browser profile proxy hijacks -> ${GATEWAY_IP}:"
+  while IFS='|' read -r profile hosts _ports portals; do
+    case "$profile" in ''|'#'*) continue ;; esac
+    for host in $(printf '%s\n' "$hosts" | tr ',' ' '); do
+      [ -n "$host" ] || continue
+      printf '    local-zone: "%s." redirect\n' "$host" >>/etc/unbound/unbound.conf
+      printf '    local-data: "%s. 60 IN A %s"\n' "$host" "$GATEWAY_IP" >>/etc/unbound/unbound.conf
+      echo "  $profile proxy $host"
+    done
+    PORTAL_HOSTS="${PORTAL_HOSTS}${PORTAL_HOSTS:+,}${portals}"
+  done <"$LEGACY_BROWSER_PROFILES_FILE"
+fi
+
 cat >>/etc/unbound/unbound.conf <<EOF
 
 # Forward all other lookups inside the captive zone to docker's embedded DNS.
@@ -306,7 +369,7 @@ HDTP_STATUS="disabled"
 WAP_STATUS="disabled"
 [ "$WAP_ENABLE" = "1" ] && WAP_STATUS="${GATEWAY_IP}:9200,${GATEWAY_IP}:9201 transcode=${WAP_TRANSCODE_BIND} hijack=[${WAP_HIJACK_ENDPOINTS}]"
 [ "$HDTP_ENABLE" = "1" ] && HDTP_STATUS="${GATEWAY_IP}:${HDTP_GW_PORT} hijack=[${HDTP_HIJACK_ENDPOINTS}]"
-echo "FOU NAT ready: fou_udp=127.0.0.1:${FOU_LISTEN_PORT} relay_tcp=0.0.0.0:${FOU_TCP_PORT} relay_udp_bind=127.0.0.1:${FOU_REMOTE_PORT} tunnel=fou0 ${TUNNEL_ADDR} nat=${MOBILE_CIDR} dns=${GATEWAY_IP}:53 http=${GATEWAY_IP}:80 speedtest=${SPEEDTEST_UPSTREAM} edge-resolver=${EDGE_RESOLVER_BIND} mgmt=${MGMT_GRPC_ADDR} hdtp-gw=${HDTP_STATUS} wap-gw=${WAP_STATUS}"
+echo "FOU NAT ready: fou_udp=127.0.0.1:${FOU_LISTEN_PORT} relay_tcp=0.0.0.0:${FOU_TCP_PORT} relay_udp_bind=127.0.0.1:${FOU_REMOTE_PORT} tunnel=fou0 ${TUNNEL_ADDR} nat=${MOBILE_CIDR} dns=${GATEWAY_IP}:53 http=${GATEWAY_IP}:80 https_blocked=${BLOCK_MOBILE_HTTPS} http_compat=${HTTP_COMPAT_GW_ENABLE} speedtest=${SPEEDTEST_UPSTREAM} edge-resolver=${EDGE_RESOLVER_BIND} mgmt=${MGMT_GRPC_ADDR} hdtp-gw=${HDTP_STATUS} wap-gw=${WAP_STATUS}"
 
 unbound -d -c /etc/unbound/unbound.conf &
 unbound_pid=$!
@@ -356,6 +419,12 @@ if [ "$WAP_ENABLE" = "1" ]; then
     wapbox_pid=$!
 fi
 
+http_compat_pid=""
+if [ "$HTTP_COMPAT_GW_ENABLE" = "1" ]; then
+    HTTP_COMPAT_GW_BIND="$HTTP_COMPAT_GW_BIND" HTTP_COMPAT_GW_PORTAL_HOSTS="$PORTAL_HOSTS" HTTP_COMPAT_GW_REWRITES="$HTTP_COMPAT_GW_REWRITES" /usr/local/bin/http-compat-gw &
+    http_compat_pid=$!
+fi
+
 /usr/local/bin/fou-tcp-relay \
   --tcp-port "$FOU_TCP_PORT" \
   --udp-bind-port "$FOU_REMOTE_PORT" \
@@ -364,11 +433,11 @@ fi
 relay_pid=$!
 
 # shellcheck disable=SC2086
-trap 'kill $relay_pid $nginx_pid $resolver_pid $unbound_pid $hdtp_pid $wapbox_pid $bearerbox_pid $transcode_pid 2>/dev/null || true; wait $relay_pid $nginx_pid $resolver_pid $unbound_pid $hdtp_pid $wapbox_pid $bearerbox_pid $transcode_pid 2>/dev/null || true' INT TERM EXIT
+trap 'kill $relay_pid $nginx_pid $resolver_pid $unbound_pid $hdtp_pid $wapbox_pid $bearerbox_pid $transcode_pid $http_compat_pid 2>/dev/null || true; wait $relay_pid $nginx_pid $resolver_pid $unbound_pid $hdtp_pid $wapbox_pid $bearerbox_pid $transcode_pid $http_compat_pid 2>/dev/null || true' INT TERM EXIT
 
 while :; do
   for pid in "$relay_pid" "$nginx_pid" "$resolver_pid" "$unbound_pid" "$hdtp_pid" \
-             "$bearerbox_pid" "$wapbox_pid" "$transcode_pid"; do
+             "$bearerbox_pid" "$wapbox_pid" "$transcode_pid" "$http_compat_pid"; do
     [ -n "$pid" ] || continue
     if ! kill -0 "$pid" 2>/dev/null; then
       exit 1

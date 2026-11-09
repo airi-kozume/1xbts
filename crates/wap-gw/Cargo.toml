@@ -16,6 +16,8 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+url = "2"
+scraper = "0.20"
 
 [dev-dependencies]
 # Parses the emitted decks in tests so well-formedness is checked by a parser
@@ -30,6 +32,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "wap-gw"
 path = "src/main.rs"
+
+[[bin]]
+name = "http-compat-gw"
+path = "src/http_compat.rs"
 
 [lints]
 workspace = true

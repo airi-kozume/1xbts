@@ -6,7 +6,8 @@ use crate::typed::{
     AddsDeliverAckMessage, AddsDeliverMessage, AddsPageAckMessage, AddsPageMessage,
     AddsTransferAckMessage, AddsTransferMessage, AssignmentCompleteMessage,
     AssignmentRequestMessage, CmServiceRequestMessage, LocationUpdatingAcceptMessage,
-    LocationUpdatingRequestMessage, MobileIdentity, PagingRequestMessage, PagingResponseMessage,
+    LocationUpdatingRejectMessage, LocationUpdatingRequestMessage, MobileIdentity,
+    PagingRequestMessage, PagingResponseMessage,
 };
 
 pub const CONTENT_TYPE_FEMTO: &str = "application/vnd.3gpp2.FemtoInterfaceMsg";
@@ -499,6 +500,16 @@ impl FemtoInterfaceMsg {
             discriminator: Some(Discriminator::Dtap),
             message_name: Some("Location Updating Accept".to_string()),
             ies,
+        })
+    }
+
+    /// Encodes a mobility-management registration refusal for Fx2 downlink.
+    pub fn from_location_updating_reject(msg: &LocationUpdatingRejectMessage) -> Result<Self> {
+        Ok(Self {
+            message_type: MSG_TYPE_LOCATION_UPDATING_REJECT,
+            discriminator: Some(Discriminator::Dtap),
+            message_name: Some("Location Updating Reject".to_string()),
+            ies: vec![FemtoIe::tv(IE_CAUSE, &[msg.reject_cause.encode()?])],
         })
     }
 
@@ -1496,5 +1507,28 @@ mod otasp_transport_tests {
             let parsed = FemtoInterfaceMsg::parse(&femto.encode()).unwrap();
             assert_eq!(parsed.to_adds_deliver_ack().unwrap(), ack);
         }
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::{LocationUpdatingRejectMessage, REJECT_CAUSE_ILLEGAL_MS, RejectCause};
+
+    #[test]
+    fn location_updating_reject_encodes_as_fx2_dtap_with_reject_cause() {
+        let message = LocationUpdatingRejectMessage {
+            reject_cause: RejectCause(REJECT_CAUSE_ILLEGAL_MS),
+        };
+
+        let femto = FemtoInterfaceMsg::from_location_updating_reject(&message).unwrap();
+        let parsed = FemtoInterfaceMsg::parse(&femto.encode()).unwrap();
+
+        assert_eq!(parsed.message_type, MSG_TYPE_LOCATION_UPDATING_REJECT);
+        assert_eq!(parsed.discriminator, Some(Discriminator::Dtap));
+        assert_eq!(
+            parsed.first_ie(IE_CAUSE).unwrap().content,
+            vec![IE_CAUSE, REJECT_CAUSE_ILLEGAL_MS]
+        );
     }
 }

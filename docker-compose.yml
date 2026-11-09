@@ -63,6 +63,9 @@ services:
     ports:
       - "127.0.0.1:17012:17012/tcp"
       - "127.0.0.1:${SPEEDTEST_PORT:-5656}:80/tcp"
+    volumes:
+      - ./config/legacy-browser-profiles.conf:/etc/legacy-browser-profiles.conf:ro
+      - ./config/legacy-url-rewrites.conf:/etc/legacy-url-rewrites.conf:ro
     environment:
       FOU_LISTEN_PORT: "17010"
       FOU_REMOTE_PORT: "17011"
@@ -73,6 +76,13 @@ services:
       SPEEDTEST_UPSTREAM: "http://speedtest:5656"
       LOCAL_DNS_ZONE: "local.1xbts.org"
       UNBOUND_FORWARD_ADDRS: ${UNBOUND_FORWARD_ADDRS:-8.8.8.8}
+      # The femto's default legacy-browser path: client HTTPS is refused, while
+      # normal client HTTP is transparently fetched over HTTPS by the gateway.
+      # This keeps TLS off the handset without requiring a cellular proxy.
+      BLOCK_MOBILE_HTTPS: "${BLOCK_MOBILE_HTTPS:-1}"
+      HTTP_COMPAT_GW_ENABLE: "${HTTP_COMPAT_GW_ENABLE:-1}"
+      HTTP_COMPAT_GW_BIND: "${HTTP_COMPAT_GW_BIND:-10.55.0.1:8081}"
+      HTTP_COMPAT_GW_REWRITES: "/etc/legacy-url-rewrites.conf"
       # Used by the edge-resolver sidecar to look up subscriber MSISDN
       # via the BSC's PdsnManagementService facade for the X-1xBTS-MSISDN
       # header it injects into MMSC traffic.

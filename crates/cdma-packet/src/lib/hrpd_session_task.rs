@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::capture::{self, Direction as CaptureDirection};
 use crate::engine::{
     PacketSession, PacketTraceEvent, SessionAction, SessionPhase, bytes_to_hex, now_ms,
 };
@@ -804,6 +805,7 @@ impl HrpdA10Session {
                     }
                     path_stats.uplink_a10_frames = path_stats.uplink_a10_frames.saturating_add(1);
                     path_stats.uplink_a10_bytes = path_stats.uplink_a10_bytes.saturating_add(bits.len() as u64);
+                    capture::write_a10_chunk(CaptureDirection::Uplink, &bits);
                     let actions = session.ingest_a10_byte_stream(&bits);
                     if process_hrpd_actions(
                         &self.session_id,
@@ -1118,6 +1120,7 @@ async fn process_hrpd_actions(
             }
             SessionAction::SendFrame { bits, .. } => {
                 let len = bits.len();
+                capture::write_a10_chunk(CaptureDirection::Downlink, &bits);
                 if downlink_tx.send(bits).await.is_err() {
                     log::warn!(
                         "hrpd-packet-service: session {} downlink A10 byte-stream channel closed",

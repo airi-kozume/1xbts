@@ -41,6 +41,7 @@ RUN apt-get update \
 COPY --from=resolver-build /src/target/release/edge-resolver /usr/local/bin/edge-resolver
 COPY --from=resolver-build /src/target/release/hdtp-gw /usr/local/bin/hdtp-gw
 COPY --from=resolver-build /src/target/release/wap-gw /usr/local/bin/wap-gw
+COPY --from=resolver-build /src/target/release/http-compat-gw /usr/local/bin/http-compat-gw
 COPY docker/fou-nat/entrypoint.sh /usr/local/bin/fou-nat-entrypoint
 COPY docker/fou-nat/fou_tcp_relay.py /usr/local/bin/fou-tcp-relay
 RUN chmod +x /usr/local/bin/fou-nat-entrypoint

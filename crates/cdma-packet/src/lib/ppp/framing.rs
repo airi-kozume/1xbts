@@ -114,7 +114,7 @@ impl HdlcDeframer {
             }
 
             // Unescape the frame.
-            let unescaped = match unescape(&raw_frame) {
+            let mut unescaped = match unescape(&raw_frame) {
                 Some(data) => data,
                 None => continue, // Malformed escape sequence.
             };
@@ -127,8 +127,14 @@ impl HdlcDeframer {
             // Validate FCS-16: compute over entire unescaped content including the FCS bytes.
             // Result should equal FCS16_GOOD.
             if fcs16(&unescaped) != FCS16_GOOD {
-                log::debug!("PPP HDLC: FCS check failed, discarding frame");
-                continue;
+                if recover_single_byte_ipv4_tcp_corruption(&mut unescaped) {
+                    log::warn!(
+                        "PPP HDLC: recovered a single-byte IPv4/TCP payload corruption after FCS failure"
+                    );
+                } else {
+                    log::debug!("PPP HDLC: FCS check failed, discarding frame");
+                    continue;
+                }
             }
 
             // Strip address + control header.
@@ -163,6 +169,136 @@ impl HdlcDeframer {
 
         packets
     }
+}
+
+/// Attempts to recover the known femto bearer failure mode where exactly one
+/// byte of an IPv4/TCP payload changes after PPP and TCP checksums are written.
+///
+/// A recovery is accepted only when it is unique and makes both the original
+/// PPP FCS and the inner TCP checksum valid. This deliberately does not relax
+/// FCS validation for arbitrary PPP frames.
+fn recover_single_byte_ipv4_tcp_corruption(frame: &mut [u8]) -> bool {
+    let frame_end = match frame.len().checked_sub(2) {
+        Some(end) => end,
+        None => return false,
+    };
+
+    let mut cursor = 0;
+    if frame.get(..2) == Some(&[ADDRESS, CONTROL]) {
+        cursor = 2;
+    }
+    let (protocol, ip_start) = match frame.get(cursor) {
+        Some(protocol) if protocol & 1 != 0 => (*protocol as u16, cursor + 1),
+        Some(_) if cursor + 2 <= frame_end => (
+            u16::from_be_bytes([frame[cursor], frame[cursor + 1]]),
+            cursor + 2,
+        ),
+        _ => return false,
+    };
+    if protocol != 0x0021 {
+        return false;
+    }
+
+    let ip = &frame[ip_start..frame_end];
+    if ip.len() < 20 || ip[0] >> 4 != 4 {
+        return false;
+    }
+    let ip_header_len = usize::from(ip[0] & 0x0f) * 4;
+    let total_len = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
+    if ip_header_len < 20
+        || ip_header_len > ip.len()
+        || total_len != ip.len()
+        || total_len < ip_header_len + 20
+        || ip[9] != 6
+        || !internet_checksum_valid(&ip[..ip_header_len])
+    {
+        return false;
+    }
+
+    let tcp_start = ip_start + ip_header_len;
+    let tcp_len = total_len - ip_header_len;
+    let tcp_header_len = usize::from(frame[tcp_start + 12] >> 4) * 4;
+    if tcp_header_len < 20 || tcp_header_len > tcp_len {
+        return false;
+    }
+    let tcp_end = ip_start + total_len;
+    let tcp_payload_start = tcp_start + tcp_header_len;
+    if tcp_payload_start == tcp_end {
+        return false;
+    }
+
+    let checksum_sum = tcp_checksum_sum(ip, &frame[tcp_start..tcp_end]);
+    if checksum_sum == u16::MAX {
+        return false;
+    }
+
+    let mut repair = None;
+    for word_start in (tcp_payload_start..tcp_end).step_by(2) {
+        let old_high = frame[word_start];
+        let old_low = frame.get(word_start + 1).copied().unwrap_or(0);
+        let old_word = u16::from_be_bytes([old_high, old_low]);
+        let checksum_without_word =
+            fold_checksum_sum(u32::from(checksum_sum) + u32::from(!old_word));
+        let replacement_word = !checksum_without_word;
+        let [new_high, new_low] = replacement_word.to_be_bytes();
+
+        let candidate = if new_high != old_high && new_low == old_low {
+            Some((word_start, new_high))
+        } else if word_start + 1 < tcp_end && new_high == old_high && new_low != old_low {
+            Some((word_start + 1, new_low))
+        } else {
+            None
+        };
+        let Some((offset, replacement)) = candidate else {
+            continue;
+        };
+
+        let original = frame[offset];
+        frame[offset] = replacement;
+        let valid = fcs16(frame) == FCS16_GOOD
+            && internet_checksum_valid(&frame[ip_start..ip_start + ip_header_len])
+            && tcp_checksum_sum(&frame[ip_start..tcp_end], &frame[tcp_start..tcp_end]) == u16::MAX;
+        frame[offset] = original;
+        if valid {
+            if repair.is_some() {
+                return false;
+            }
+            repair = Some((offset, replacement));
+        }
+    }
+
+    let Some((offset, replacement)) = repair else {
+        return false;
+    };
+    frame[offset] = replacement;
+    true
+}
+
+fn fold_checksum_sum(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & u32::from(u16::MAX)) + (sum >> 16);
+    }
+    sum as u16
+}
+
+fn internet_checksum_valid(data: &[u8]) -> bool {
+    fold_checksum_sum(checksum_words(data)) == u16::MAX
+}
+
+fn checksum_words(data: &[u8]) -> u32 {
+    let mut sum = 0u32;
+    for chunk in data.chunks(2) {
+        sum += u32::from(u16::from_be_bytes([chunk[0], *chunk.get(1).unwrap_or(&0)]));
+    }
+    sum
+}
+
+fn tcp_checksum_sum(ip: &[u8], tcp: &[u8]) -> u16 {
+    let mut sum = checksum_words(&ip[12..20]);
+    sum += u32::from(ip[9]);
+    sum += tcp.len() as u32;
+    sum += checksum_words(tcp);
+    fold_checksum_sum(sum)
 }
 
 /// Unescape HDLC: replace 0x7D XX with XX^0x20.
@@ -452,6 +588,57 @@ mod tests {
         let mut deframer = HdlcDeframer::new();
         let packets = deframer.feed(&framed);
         assert!(packets.is_empty());
+    }
+
+    #[test]
+    fn recovers_unique_single_byte_tcp_payload_corruption() {
+        let payload = vec![0x5c; 600];
+        let ip = ipv4_tcp_packet(&payload);
+        let pkt = PppPacket {
+            protocol: 0x0021,
+            payload: ip,
+        };
+        let opts = FrameOptions {
+            tx_accm: 0,
+            acfc: true,
+            pfc: true,
+        };
+        let mut framed = frame_with_options(&pkt, &opts);
+
+        // The test payload contains only unescaped 0x5c octets. Corrupt one
+        // of them after the checksums have been written, matching the FAP
+        // bearer failure observed in the field capture.
+        let payload_offset = framed.len() - 64;
+        assert_eq!(framed[payload_offset], 0x5c);
+        framed[payload_offset] = 0x78;
+
+        let mut deframer = HdlcDeframer::new();
+        let packets = deframer.feed(&framed);
+        assert_eq!(packets, vec![pkt]);
+    }
+
+    fn ipv4_tcp_packet(payload: &[u8]) -> Vec<u8> {
+        let total_len = 20 + 20 + payload.len();
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 55, 0, 2]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 1]);
+        packet[20..22].copy_from_slice(&12345u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        packet[24..28].copy_from_slice(&1u32.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = 0x18;
+        packet[34..36].copy_from_slice(&4096u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+
+        let ip_checksum = !fold_checksum_sum(checksum_words(&packet[..20]));
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        let tcp_checksum = !tcp_checksum_sum(&packet[..], &packet[20..]);
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
+        packet
     }
 
     #[test]
