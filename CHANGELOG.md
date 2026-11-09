@@ -1,5 +1,3 @@
-# HEAD
-<<<<<<< Updated upstream
 - Airave 2.5 (5.x firmware) femtocells now receive a changed `term_auth_psk` on the next sync (EV-DO terminal authentication failed after the secret was regenerated).
 - A1 now runs as A1p (BSAP over SUA over SCTP 14001).
 - Abis traffic, A2p, A8/A10, A9, A11 and A21 now use their standard formats and ports, so third-party PCFs and PDSNs interoperate. `docs/PORTS.md` lists the ports.
@@ -14,7 +12,7 @@
 - Improve traffic channel FER (RC1/RC2/RC3).
 - Web UI UX updates.
 - Fix issue with USB threads not getting real-time scheduling on macOS.
-=======
+
 
 - Reduce navigation clutter in simplified article pages.
 
