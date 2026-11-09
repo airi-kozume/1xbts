@@ -51,7 +51,7 @@
     "feature_codes": ["*228"],
     "spc_policy": "leave_default",
     "system_tag": {
-      "name": "1xBTS",
+      "name": "Kozume Wireless",
       "tag_p_rev": 1
     },
     "home_network": {
